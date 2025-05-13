@@ -1,68 +1,68 @@
-// this example is public domain. enjoy!
-// www.ladyada.net/learn/sensors/thermocouple
-
-#include <max6675.h>
 #include <ModbusRtu.h>
+#include <max6675.h>
 
-// data array for modbus network sharing
-uint16_t au16data[16] = {
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, -1 };
+// Pin configuration
+const int SSR_PIN = 8; // SSR control pin
+const int thermoCLK = 6;
+const int thermoCS1 = 7;
+const int thermoCS2 = 5;
+const int thermoDO = 4;
 
-/**
- *  Modbus object declaration
- *  u8id : node id = 0 for master, = 1..247 for slave
- *  u8serno : serial port (use 0 for Serial)
- *  u8txenpin : 0 for RS-232 and USB-FTDI 
- *               or any pin number > 1 for RS-485
- */
-Modbus slave(1,0,0); // this is slave @1 and RS-232 or USB-FTDI
+// Thermocouples
+MAX6675 thermocouple(thermoCLK, thermoCS1, thermoDO);
+MAX6675 thermocouple2(thermoCLK, thermoCS2, thermoDO);
 
+// Modbus slave
+Modbus slave(1, 0, 2); // slave ID, Serial port (0 = Serial), DE/RE pin = 2
+uint16_t au16data[16]; // Modbus register buffer
 
+// PWM control variables
+#define PWM_CYCLE_MS 1000  // 1 second total cycle
+#define PWM_RESOLUTION 100 // 100 steps = 1% precision
+unsigned long lastPwmUpdate = 0;
+int pwmStep = 0;
 
-//Thermocouple 1
-int thermoDO = 2;
-int thermoCS = 3;
-int thermoCLK = 4;
+void setup()
+{
+  // Serial setup
+  Serial.begin(9600);
 
-//Thermocouple 2
-int thermoDO2 = 8; // Add a 2 to each int from first Thermocouple. Ex(ThermoDO to ThermoDO2).
-int thermoCS2 = 9; // Change pins to the ones you use for your board. Can be any digital pins.
-int thermoCLK2 = 7;
+  // Pin modes
+  pinMode(SSR_PIN, OUTPUT);
+  digitalWrite(SSR_PIN, LOW); // ensure SSR is off initially
 
-MAX6675 thermocouple2(thermoCLK, thermoCS, thermoDO);
-
-MAX6675 thermocouple(thermoCLK2, thermoCS2, thermoDO2); //Thermocouple 2
-  
-int led = 5;  
-  
-void setup() {
-  slave.begin( 19200 ); // 19200 baud, 8-bits, none, 1-bit stop
-  // use Arduino pins 
-  pinMode(led, OUTPUT);
- delay(500);
-  
+  // Modbus start
+  slave.begin(9600); // Baud rate must match Artisan config
 }
 
-void loop() {
-  // basic readout test, just print the current temp
-  
-   //Serial.print("C = "); 
-   
-   au16data[2] = (uint16_t) (thermocouple.readCelsius()*100); 
-   
-   au16data[3] = (uint16_t) (thermocouple2.readCelsius()*100);
-   
-   slave.poll( au16data, 16 );
+void loop()
+{
+  // Read Artisan commands
+  slave.poll(au16data, 16);
 
-   for(int i=1; i<=99; i++) {
-    if(i<=au16data[4])
-       digitalWrite(led, HIGH);
-      else
-        digitalWrite(led, LOW);
-      if ( (i % 20) == 0) {
-        slave.poll( au16data, 16 );
-      }
-    delay(40);
-   }
-   
+  // Read thermocouples
+  au16data[2] = (uint16_t)(thermocouple.readCelsius() * 100);  // Register 2
+  au16data[3] = (uint16_t)(thermocouple2.readCelsius() * 100); // Register 3
+
+  // Get PWM target from Artisan (assume slider writes to register 4)
+  int pwmTarget = au16data[4]; // Value from 0 to 100
+
+  // Time per PWM step
+  unsigned long stepInterval = PWM_CYCLE_MS / PWM_RESOLUTION;
+
+  // PWM update logic (non-blocking)
+  if (millis() - lastPwmUpdate >= stepInterval)
+  {
+    lastPwmUpdate = millis();
+    pwmStep = (pwmStep + 1) % PWM_RESOLUTION;
+
+    if (pwmStep < pwmTarget)
+    {
+      digitalWrite(SSR_PIN, HIGH);
+    }
+    else
+    {
+      digitalWrite(SSR_PIN, LOW);
+    }
+  }
 }
