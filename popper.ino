@@ -1,19 +1,26 @@
+// (The full sketch from the previous response ending with "...Serial.println("C"); } }")
 // Libraries
 #include <max6675.h>
 #include <ModbusRtu.h>
 
 // --- Pin Definitions ---
-const int SSR_PIN = 5; // Was 'led' in your original sketch
+const int SSR_PIN = 5; // Heater control
 
-// Thermocouple 1 Pins (ensure these match your physical wiring)
+// Thermocouple 1 Pins
 const int TC1_DO_PIN = 2;
 const int TC1_CS_PIN = 3;
 const int TC1_CLK_PIN = 4;
 
-// Thermocouple 2 Pins (ensure these match your physical wiring)
+// Thermocouple 2 Pins
 const int TC2_DO_PIN = 8;
 const int TC2_CS_PIN = 9;
 const int TC2_CLK_PIN = 7;
+
+// Fan Control Pin Definition
+const int FAN_CONTROL_PIN = 6;
+
+// --- Global Configuration Constants ---
+const int MIN_FAN_PERCENT_IF_HEATER_ON = 20;
 
 // --- MAX6675 Thermocouple Objects ---
 MAX6675 thermocouple1(TC1_CLK_PIN, TC1_CS_PIN, TC1_DO_PIN);
@@ -21,15 +28,15 @@ MAX6675 thermocouple2(TC2_CLK_PIN, TC2_CS_PIN, TC2_DO_PIN);
 
 // --- Modbus Configuration ---
 uint16_t au16data[16];
-Modbus slave(1, 0, 0); // Slave ID 1, Serial0, No TX_ENABLE pin
+Modbus slave(1, 0, 0);
 
-// --- Time-Proportional Control Variables ---
+// --- Time-Proportional Control Variables (for Heater) ---
 unsigned long lastCycleStartTime = 0;
 const unsigned long CYCLE_LENGTH_MS = 1000;
 
 // --- Thermocouple Reading Timer ---
 unsigned long lastTempReadTime = 0;
-const unsigned long TEMP_READ_INTERVAL_MS = 1000; // Read temps every 1 second
+const unsigned long TEMP_READ_INTERVAL_MS = 1000;
 
 void setup()
 {
@@ -39,11 +46,13 @@ void setup()
   pinMode(SSR_PIN, OUTPUT);
   digitalWrite(SSR_PIN, LOW);
 
-  // Initialize Modbus registers
-  au16data[4] = 0; // Default power to 0%
-  // Initialize temp registers to a known "error" or "not yet read" state if desired
-  // au16data[2] = 0; // Or some indicator like 99999 for error
-  // au16data[3] = 0;
+  pinMode(FAN_CONTROL_PIN, OUTPUT);
+  analogWrite(FAN_CONTROL_PIN, 0);
+
+  au16data[2] = 0;
+  au16data[3] = 0;
+  au16data[4] = 0;
+  au16data[5] = 0;
 
   // Ensure MAX6675 CS pins are initially high (deselected)
   // The library constructor should do this, but being explicit doesn't hurt.
@@ -51,67 +60,59 @@ void setup()
   digitalWrite(TC2_CS_PIN, HIGH);
 
   delay(500); // Allow sensors to stabilize
-  Serial.println("Arduino Modbus Heater Control Ready.");
-  Serial.print("SSR Pin: ");
+
+  Serial.println("Arduino Modbus Heater & Fan Control Ready.");
+  Serial.print("SSR Pin (Heater): ");
   Serial.println(SSR_PIN);
-  Serial.print("Cycle Length: ");
+  Serial.print("Fan Control Pin (PWM): ");
+  Serial.println(FAN_CONTROL_PIN);
+  Serial.print("Min Fan % if Heater ON: ");
+  Serial.println(MIN_FAN_PERCENT_IF_HEATER_ON);
+  Serial.print("Heater Cycle Length: ");
   Serial.print(CYCLE_LENGTH_MS);
   Serial.println(" ms");
   Serial.print("Temp Read Interval: ");
   Serial.print(TEMP_READ_INTERVAL_MS);
   Serial.println(" ms");
+  Serial.println("---------------------------------------------");
 }
 
 void loop()
 {
   unsigned long currentTime = millis(); // Get current time once per loop
 
-  // --- Modbus Communication ---
   slave.poll(au16data, 16);
 
-  // --- Read Thermocouples on a Timer ---
   if (currentTime - lastTempReadTime >= TEMP_READ_INTERVAL_MS)
   {
     lastTempReadTime = currentTime;
-    float tempC1 = NAN, tempC2 = NAN; // Initialize to NAN
+    float tempC1 = NAN, tempC2 = NAN;
 
-    // Read Thermocouple 1
     digitalWrite(TC2_CS_PIN, HIGH); // Ensure other thermocouple is deselected
     delayMicroseconds(50);          // Short delay for CS lines to settle
     tempC1 = thermocouple1.readCelsius();
-    digitalWrite(TC1_CS_PIN, HIGH); // Ensure this one is deselected (library should do this, but for clarity)
+    digitalWrite(TC1_CS_PIN, HIGH);
 
     if (!isnan(tempC1))
     {
       au16data[2] = (uint16_t)(tempC1 * 100);
     }
-    else
-    {
-      // Optional: Keep last good value or set error code in au16data[2]
-      // Serial.println("Error reading Thermocouple 1!");
-    }
 
     delay(20); // Brief pause between reading different SPI devices
 
-    // Read Thermocouple 2
     digitalWrite(TC1_CS_PIN, HIGH); // Ensure other thermocouple is deselected
-    delayMicroseconds(50);          // Short delay
+    delayMicroseconds(50);          // Short delay for CS lines to settle
     tempC2 = thermocouple2.readCelsius();
-    digitalWrite(TC2_CS_PIN, HIGH); // Ensure this one is deselected
+    digitalWrite(TC2_CS_PIN, HIGH);
 
     if (!isnan(tempC2))
     {
       au16data[3] = (uint16_t)(tempC2 * 100);
     }
-    else
-    {
-      // Optional: Keep last good value or set error code in au16data[3]
-      // Serial.println("Error reading Thermocouple 2!");
-    }
   }
 
   // --- Power Control Logic ---
-  int powerPercent = constrain(au16data[4], 0, 100);
+  int heaterPowerPercent = constrain(au16data[4], 0, 100);
   unsigned long elapsedTimeInCycle = currentTime - lastCycleStartTime;
 
   if (elapsedTimeInCycle >= CYCLE_LENGTH_MS)
@@ -120,9 +121,9 @@ void loop()
     elapsedTimeInCycle = 0;
   }
 
-  unsigned long onTimeMs = (CYCLE_LENGTH_MS * powerPercent) / 100;
+  unsigned long heaterOnTimeMs = (CYCLE_LENGTH_MS * heaterPowerPercent) / 100;
 
-  if (elapsedTimeInCycle < onTimeMs)
+  if (elapsedTimeInCycle < heaterOnTimeMs)
   {
     digitalWrite(SSR_PIN, HIGH);
   }
@@ -131,29 +132,46 @@ void loop()
     digitalWrite(SSR_PIN, LOW);
   }
 
-  // --- Debugging Output ---
+  int requestedFanPowerPercent = constrain(au16data[5], 0, 100);
+  int actualFanPowerPercent = requestedFanPowerPercent;
+
+  if (heaterPowerPercent > 0)
+  {
+    if (actualFanPowerPercent < MIN_FAN_PERCENT_IF_HEATER_ON)
+    {
+      actualFanPowerPercent = MIN_FAN_PERCENT_IF_HEATER_ON;
+    }
+  }
+
+  int fanPwmValue = map(actualFanPowerPercent, 0, 100, 0, 255);
+  analogWrite(FAN_CONTROL_PIN, fanPwmValue);
+
   static unsigned long lastDebugPrintTime = 0;
   if (currentTime - lastDebugPrintTime >= 2000)
-  { // Print debug info every 2 seconds
+  {
     lastDebugPrintTime = currentTime;
 
-    Serial.print("Modbus PwrSet (AU4):");
+    Serial.print("HtrPwr(AU4):");
     Serial.print(au16data[4]);
-    Serial.print(" -> Actual %:");
-    Serial.print(powerPercent);
-    // Serial.print(", ON_Time_ms:"); Serial.print(onTimeMs); // onTimeMs might be from a previous cycle if power logic is offset
-    Serial.print(", SSR:");
+    Serial.print("% Act:");
+    Serial.print(heaterPowerPercent);
+    Serial.print("% SSR:");
     Serial.print(digitalRead(SSR_PIN) == HIGH ? "ON" : "OFF");
 
-    // Display temperatures from Modbus registers (what Artisan would see)
+    Serial.print(" | FanReq(AU5):");
+    Serial.print(requestedFanPowerPercent);
+    Serial.print("% Act:");
+    Serial.print(actualFanPowerPercent);
+    Serial.print("% PWM:");
+    Serial.print(fanPwmValue);
+
     float debugTempC1 = au16data[2] / 100.0;
     float debugTempC2 = au16data[3] / 100.0;
 
     Serial.print(" | T1(AU2):");
-    Serial.print(debugTempC1, 2);
-    Serial.print("C | T2(AU3):");
-    Serial.print(debugTempC2, 2);
+    Serial.print(debugTempC1, 1);
+    Serial.print("C, T2(AU3):");
+    Serial.print(debugTempC2, 1);
     Serial.println("C");
-    Serial.println("---");
   }
 }
